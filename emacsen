@@ -409,7 +409,8 @@ check_rootful() {
     [[ $1 != *name=rootless* ]] || fatal "install and uninstall require a rootful Docker daemon"
 }
 
-# Build-info and installation records share this header; the sections after it are provenance.
+# Read the key: value header that build-info and installation records share from FILE into the
+# associative array HEADER; the sections after it are not read.
 read_info_header() {
     local file=$1 line key
     local -n header=$2
@@ -497,7 +498,7 @@ check_uninstallable() {
 }
 
 run_installer() (
-    local action=$1 name=$2
+    local action=$1 operand=$2
     shift 2
 
     local directory=$install_prefix directory_seen=false directory_option=--into
@@ -528,23 +529,24 @@ run_installer() (
         || fatal "cannot access Docker; check the daemon and your Docker permissions"
     check_rootful "$security_options"
 
-    scratch=$(mktemp -d "${TMPDIR:-/tmp}/emacsen-$action-XXXXXXXX")
-    trap '
-        cleanup_status=$?
-        rm -rf -- "$scratch"
-        exit "$cleanup_status"
-    ' EXIT
     if [[ $action == install ]]; then
-        tag="emacsen:$name"
+        tag="emacsen:$operand"
         image_id=$(docker image inspect --format '{{.Id}}' "$tag" 2>/dev/null) \
-            || fatal "local image $tag is missing; build it with: $root/emacsen build $name"
+            || fatal "local image $tag is missing; build it with: $root/emacsen build $operand"
         [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] \
             || fatal "invalid image identity returned for $tag"
+
+        scratch=$(mktemp -d "${TMPDIR:-/tmp}/emacsen-install-XXXXXXXX")
+        trap '
+            cleanup_status=$?
+            rm -rf -- "$scratch"
+            exit "$cleanup_status"
+        ' EXIT
         image_file "$image_id" /usr/share/emacsen/build-info "$scratch/build-info"
-        check_installable "$scratch/build-info" "$name"
+        check_installable "$scratch/build-info" "$operand"
         mkdir -p -- "$directory" || fatal "cannot create install directory: $directory"
     else
-        check_uninstallable "$directory/lib/emacsen/installed/$name" "$name"
+        check_uninstallable "$directory/lib/emacsen/installed/$operand" "$operand"
     fi
 
     project=$(CDPATH='' cd -P -- "$directory" 2>/dev/null && printf '%s/.' "$PWD") \
@@ -675,19 +677,19 @@ esac
 
 root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 action=$1
-name=$2
+operand=$2
 if [[ $action == uninstall ]]; then
-    [[ $name =~ ^$version_pattern$ ]] || fatal "invalid Emacs version: $name"
+    [[ $operand =~ ^$version_pattern$ ]] || fatal "invalid Emacs version: $operand"
 else
-    [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -f $root/recipes/$name/recipe ]] \
-        || fatal "no recipe named $name"
+    [[ $operand =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -f $root/recipes/$operand/recipe ]] \
+        || fatal "no recipe named $operand"
 fi
 
 # Second pass: run the command.
 shift 2
 case $action in
-    build) build_image "$name" "$@" ;;
-    update) update_source "$name" ;;
-    install|uninstall) run_installer "$action" "$name" "$@" ;;
-    run|exec) run_image "$action" "$name" "$@" ;;
+    build) build_image "$operand" "$@" ;;
+    update) update_source "$operand" ;;
+    install|uninstall) run_installer "$action" "$operand" "$@" ;;
+    run|exec) run_image "$action" "$operand" "$@" ;;
 esac

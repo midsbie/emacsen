@@ -13,9 +13,6 @@ fatal() { printf 'emacsen: %s\n' "$*" >&2; exit 1; }
 install_emacs() (
     local sources staged scratch
 
-    [[ $EMACSEN_SOURCE_DIRECTORY == /usr/local/share/emacs/*/ ]] \
-        || fatal "source-directory is not under /usr/local/share/emacs: $EMACSEN_SOURCE_DIRECTORY"
-
     make install
 
     # make install leaves the C sources in the tree; the installed Emacs looks for them in the src/
@@ -64,9 +61,16 @@ uninstall_emacs() (
 action=${1-}
 [[ $action == install || $action == uninstall ]] \
     || fatal "expected the action install or uninstall, got: $action"
+
 command -v install-info >/dev/null \
     || fatal "image has no install-info; rebuild it with: emacsen build ${EMACSEN_IMAGE_TAG#emacsen:}"
-command -v flock >/dev/null || fatal "image has no flock: $EMACSEN_IMAGE_TAG"
+command -v flock >/dev/null \
+    || fatal "image has no flock: $EMACSEN_IMAGE_TAG"
+
+if [[ $action == install ]]; then
+    [[ $EMACSEN_SOURCE_DIRECTORY == /usr/local/share/emacs/*/ ]] \
+        || fatal "source-directory is not under /usr/local/share/emacs: $EMACSEN_SOURCE_DIRECTORY"
+fi
 
 state=/usr/local/lib/emacsen
 record=$state/installed/$EMACSEN_EMACS_VERSION
