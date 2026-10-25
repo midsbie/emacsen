@@ -4,9 +4,9 @@ Build Emacs recipes into Docker images. Install an image's Emacs on the host, or
 
 * Requirements
 
-- Modern Linux, Docker Engine 25+ with BuildKit, access to the daemon.
+- Linux; =run= and =exec= require kernel 5.12+ for [[https://docs.docker.com/engine/storage/bind-mounts/#recursive-mounts][recursive read-only mounts]].
+- Docker Engine 25+ with BuildKit, access to the daemon.
 - Bash 5, Git, curl, GNU coreutils and findutils, util-linux =flock=.
-- =install=: a rootful daemon and an image whose distribution and release match the host. =docker= group membership is root-equivalent.
 
 #+begin_src sh
 git clone https://github.com/midsbie/emacsen.git
@@ -27,11 +27,11 @@ cd emacsen
 Recipe, builder and lock metadata: =key=value= lines and =#= comments, no quoting or expansion. Keys are lowercase letters, digits and hyphens, starting with a letter. Duplicate, unknown and misplaced keys are refused.
 
 - Recipe :: =source= and =builder= required; =version= optional, checked against the built Emacs. Source keys by kind:
-- =tarball= :: =url=, =sha256=. Downloads are verified and cached at =.emacsen/sources/tarballs/SHA256=.
-- =git= :: =url=, full =ref=. =recipes/NAME/lock= names the commit; a build requires a lock matching =ref=, fetches the commit at depth 1 into =.emacsen/sources/emacs.git= and exports it with =git archive=. Recipes name the GitHub mirror because savannah stalls on shallow fetches; the commit identifies the source.
-- Builder :: =builders/NAME/{builder,Dockerfile,build.sh}=: build procedure, dependencies and configure options. =builder= accepts only =variants=, space-separated; without variants the file holds only comments. A builder used by one recipe is named for it; generalise it when a second recipe shares it.
-- =26.3= :: Ubuntu 20.04 pinned by digest, =linux/amd64=, GCC 9. Terminal and batch only, with GnuTLS, XML and zlib. Prefix =/opt/emacs/26.3=; not host-installable. Docker's default seccomp profile blocks the ASLR change its dumper needs, so it builds with =CANNOT_DUMP=yes=: standard Lisp loads at every start and =dump-emacs= is unavailable.
-- =ubuntu-26.04= :: Ubuntu 26.04, GCC 14, native compilation, tree-sitter, LTO; variants =x= and =server=. Prefix =/usr/local=; host-installable. Images keep the configured tree at =/build/emacs= and carry =install-info=. A generated =lisp/site-init.el= dumps =source-directory= as =/usr/local/share/emacs/VERSION/=, recorded as =source-directory:=; in the image its =src/= links to the tree's.
+  - =tarball= :: =url=, =sha256=. Downloads are verified and cached at =.emacsen/sources/tarballs/SHA256=.
+  - =git= :: =url=, full =ref=. Builds use the commit in =recipes/NAME/lock=, whose =ref= must match the recipe's.
+- Builder :: =builders/NAME/{builder,Dockerfile,build.sh}=: build procedure, dependencies and configure options. =builder= accepts only =variants=, space-separated; without variants the file holds only comments.
+  - =26.3= :: Ubuntu 20.04, =linux/amd64=, GCC 9. Terminal and batch only, with GnuTLS, XML and zlib. Standard Lisp loads at every start; =dump-emacs= is unavailable.
+  - =ubuntu-26.04= :: GCC 14, native compilation, tree-sitter and LTO; variants =x= and =server=.
 
 =update NAME= resolves a Git recipe's =ref= in its source repository and rewrites its lock; an annotated tag locks the commit it names. Builds never change the lock and refuse one naming anything but a commit.
 
@@ -55,9 +55,7 @@ Local Git sources accept absolute paths or =file://= URLs; no push is required. 
 ./emacsen build experiment
 #+end_src
 
-Only the locked commit enters the build. Keep it available for rebuilds with an empty source cache.
-
-Concurrent Git builds serialize cache writes on =.emacsen/sources/emacs.git.lock=, then export their retained commits independently.
+Keep the locked commit available for rebuilds with an empty source cache.
 
 =emacs/= is an upstream submodule for analysis; builds do not require it.
 
@@ -67,16 +65,16 @@ Concurrent Git builds serialize cache writes on =.emacsen/sources/emacs.git.lock
 ./emacsen build 26.3
 #+end_src
 
-A build is one =docker build --load= tagged =emacsen:NAME=, loaded into the local Docker image store. The builder directory is the context and the source archive enters as a named context, so recipe edits invalidate the compile layer only through its inputs: source, version and variant.
+Each build runs =docker build --pull --load= and tags the local image =emacsen:NAME=.
 
 Variants, for builders that declare them:
 
-- =x= :: Selected when =libx11-6= is installed on the host. X11, Xft, DBus, JPEG, PNG, RSVG, TIFF and XPM.
-- =server= :: Selected otherwise. No X11, DBus, GConf, GSettings or sound.
+- =x= :: Selected when **=dpkg=** reports =libx11-6= installed. X11, Xft, DBus, JPEG, PNG, RSVG, TIFF and XPM.
+- =server= :: Selected otherwise, including on hosts /without/ =dpkg=. No X11, DBus, GConf, GSettings or sound.
 
 =--variant x|server= overrides detection; refused for builders without variants.
 
-Builds pass =--pull=. The Ubuntu 26.04 base floats and Ubuntu packages are unpinned; the 26.3 base is digest-pinned. A rebuild can differ and moves the tag, with previous image not retained.
+The Ubuntu 26.04 base floats and Ubuntu packages are unpinned; the 26.3 base is digest-pinned. Rebuilds can differ and move the recipe tag; previous images are not retained.
 
 Each build writes =.emacsen/builds/DIGEST.txt=, =DIGEST= being the image ID without =sha256:=. It holds =image-id:=, =image-tag:= and the image's =/usr/share/emacsen/build-info=: source, Emacs version, prefix, distribution, configure options, compiler, packages, and the builder's revision, dirty state and input hashes.
 
@@ -86,28 +84,56 @@ Each build writes =.emacsen/builds/DIGEST.txt=, =DIGEST= being the image ID with
 
 * Install
 
-=install NAME= resolves =emacsen:NAME= to an image ID and runs Emacs's own =make install= from the image's retained build tree into the host's =/usr/local=. Importantly, **nothing compiles on the host and there is no host =make=, or privilege elevation**.
+=install NAME= runs Emacs's own =make install= from the image's retained build tree into the host's =/usr/local=. It requires a rootful Docker daemon; =docker= group membership is root-equivalent. Nothing compiles on the host.
 
-=make install= omits the C sources, so install then copies the tree's =src/*.c= and =src/*.h= to =share/emacs/VERSION/src=, replacing that version's previous copy. =find-function= and the help buffers' C source links reach them without the build tree, under =-Q= too.
+The image must carry =install-info=, with =build-info= declaring =build-tree:=, =prefix: /usr/local=, =source-directory: /usr/local/share/emacs/VERSION/= and =os-release:= matching the host's =ID VERSION_ID=. The container runs as root with no network, capabilities limited to CHOWN, DAC_OVERRIDE, FOWNER and FSETID, and privilege escalation disabled.
 
-Refused unless the daemon is rootful, the image carries =install-info=, and its =build-info= has =build-tree:=, =prefix: /usr/local=, =source-directory: /usr/local/share/emacs/VERSION/= and an =os-release:= equal to the host's =ID VERSION_ID=. The =26.3= recipe fails these. The container runs as root with no network, capabilities limited to CHOWN, DAC_OVERRIDE, FOWNER and FSETID, and privilege escalation disabled.
+** Host libraries
+
+Host packages for an installed Emacs on Ubuntu 26.04, beyond the desktop or terminal libraries already present. Containers carry their own. Run as root:
+
+=x=:
+
+#+begin_src sh
+apt install libgccjit0 liblcms2-2 libtree-sitter0.25
+#+end_src
+
+=server=:
+
+#+begin_src sh
+apt install libgccjit0 libgnutls30t64 libncurses6 libtree-sitter0.25 libxml2-16
+#+end_src
+
+Native compilation needs the =libgccjit= runtime matching the builder's GCC version. After a host release upgrade, target the new release in the builder and rebuild; changed library sonames can break installed binaries.
+
+Tree-sitter 0.25 loads ABI 15 grammars. Emacs 31+ installs grammars on demand into =~/.emacs.d/tree-sitter= (=treesit-auto-install-grammar=, =M-x treesit-install-language-grammar=), which needs Git and a C compiler on the host.
+
+** Rehearse and install
 
 Rehearse first. =--into DIR= binds =DIR= at =/usr/local= in the container without changing the prefix; a chroot's =usr/local= also works. A staged tree is for inspection, not relocation.
+
+Each invocation resolves =emacsen:NAME= independently and uses that image ID throughout, reporting it on stderr. The CLI has no image-ID selector. Keep the tag unchanged between rehearsal and host installation; if it changes, rehearse again.
 
 #+begin_src sh
 ./emacsen build 31.1
 stage=$(mktemp -d .emacsen/install-XXXXXXXX)
 ./emacsen install 31.1 --into "$stage/usr-local"
-head -n 16 "$stage/usr-local/lib/emacsen/installed/31.1"
+sed '/^\[/q' "$stage/usr-local/lib/emacsen/installed/31.1"
 #+end_src
 
-Then install the same image on the host; both runs report its ID on stderr:
+After inspecting the staged tree, install on the host:
 
 #+begin_src sh
 ./emacsen install 31.1
 #+end_src
 
-Versions coexist in Emacs's version-named directories. The last install owns the shared files: =bin/emacs= links to its =emacs-VERSION=; =emacsclient=, =etags=, =ebrowse=, the manuals and the man pages are replaced. Each version's record, =/usr/local/lib/emacsen/installed/VERSION=, holds =image-id:=, =image-tag:= and the image's =build-info=. Neither files nor records depend on the image remaining available. A prefix takes one install at a time, from any checkout: a second is refused while the first holds =lib/emacsen/install.lock=.
+** Installed files
+
+Different Emacs versions coexist in version-named directories. Reinstalling the same version, including another recipe or variant, replaces that version's files and record. The last install owns the shared files: =bin/emacs= links to its =emacs-VERSION=; =emacsclient=, =etags=, =ebrowse=, the manuals and the man pages are replaced. emacsen neither prunes nor uninstalls.
+
+Install copies the C sources to =share/emacs/VERSION/src=. =find-function= and the help buffers' C source links reach them without the build tree, under =-Q= too.
+
+Each version's record, =/usr/local/lib/emacsen/installed/VERSION=, holds =image-id:=, =image-tag:= and the image's =build-info=. Neither files nor records depend on the image remaining available. A prefix takes one install at a time, from any checkout: a second is refused while the first holds =lib/emacsen/install.lock=.
 
 * Run and exec
 
@@ -116,7 +142,7 @@ Versions coexist in Emacs's version-named directories. The last install owns the
 ./emacsen exec 26.3 -- sh -c 'printf "%s\n" "$PWD"; id'
 #+end_src
 
-=run NAME [--directory DIR] [-- EMACS-ARGS...]= starts the image's Emacs. =exec NAME [--directory DIR] -- COMMAND [ARGS...]= starts =COMMAND= from the image's =PATH=. Every command requires =NAME='s recipe in the checkout, even when its image exists.
+=run NAME [--directory DIR] [-- EMACS-ARGS...]= starts the image's Emacs. =exec NAME [--directory DIR] -- COMMAND [ARGS...]= starts =COMMAND= from the image's =PATH=.
 
 - Image :: The image tagged =emacsen:NAME=; stderr reports its ID. Never built or pulled; a missing image fails with the build command to run.
 - Project :: =DIR=, default the current directory, mounted at =/work=. Relative paths resolve against the current directory; symlinks resolve to the physical path, reported on stderr.
@@ -147,28 +173,6 @@ The project is read-only and each invocation is a new container, so one =exec= c
   cp -- my-package.el test/my-package-tests.el /tmp &&
   emacs -Q --batch -L /tmp -f batch-byte-compile /tmp/my-package.el /tmp/my-package-tests.el &&
   emacs -Q --batch -L /tmp -l /tmp/my-package-tests.elc -f ert-run-tests-batch-and-exit'
-#+end_src
-
-* Compatibility
-
-- Base image :: Emacs links against the image's libraries, so an installable image must match the host's distribution and release; =install= refuses a mismatch. After a host release upgrade, target the new release in the builder and rebuild. Removed libraries stop old binaries: Ubuntu 26.04 replaces =libxml2.so.2= with =libxml2.so.16=.
-- Native compilation :: The builder's compiler and =libgccjit-N-dev= must name one GCC version, currently 14. The host needs the matching =libgccjit= runtime.
-- Tree-sitter :: The image's =libtree-sitter-dev=, 0.25 on Ubuntu 26.04, loads ABI 15 grammars. The host needs =libtree-sitter0.25=; the soname carries the minor version, so rebuild when a release upgrade changes it. Emacs 31+ installs grammars on demand into =~/.emacs.d/tree-sitter= (=treesit-auto-install-grammar=, =M-x treesit-install-language-grammar=), which needs Git and a C compiler on the host.
-
-* Runtime dependencies
-
-**Host** packages for an installed Emacs on Ubuntu 26.04, beyond the desktop or terminal libraries already present. Containers carry their own. As root:
-
-=x=:
-
-#+begin_src sh
-apt install libgccjit0 liblcms2-2 libtree-sitter0.25
-#+end_src
-
-=server=:
-
-#+begin_src sh
-apt install libgccjit0 libgnutls30t64 libncurses6 libtree-sitter0.25 libxml2-16
 #+end_src
 
 * License
