@@ -31,7 +31,7 @@ Recipe, builder and lock metadata: =key=value= lines and =#= comments, no quotin
 - =git= :: =url=, full =ref=. =recipes/NAME/lock= names the commit; a build requires a lock matching =ref=, fetches the commit at depth 1 into =.emacsen/sources/emacs.git= and exports it with =git archive=. Recipes name the GitHub mirror because savannah stalls on shallow fetches; the commit identifies the source.
 - Builder :: =builders/NAME/{builder,Dockerfile,build.sh}=: build procedure, dependencies and configure options. =builder= accepts only =variants=, space-separated; without variants the file holds only comments. A builder used by one recipe is named for it; generalise it when a second recipe shares it.
 - =26.3= :: Ubuntu 20.04 pinned by digest, =linux/amd64=, GCC 9. Terminal and batch only, with GnuTLS, XML and zlib. Prefix =/opt/emacs/26.3=; not host-installable. Docker's default seccomp profile blocks the ASLR change its dumper needs, so it builds with =CANNOT_DUMP=yes=: standard Lisp loads at every start and =dump-emacs= is unavailable.
-- =ubuntu-26.04= :: Ubuntu 26.04, GCC 14, native compilation, tree-sitter, LTO; variants =x= and =server=. Prefix =/usr/local=; host-installable. Images keep the configured tree at =/build/emacs= and carry =install-info=.
+- =ubuntu-26.04= :: Ubuntu 26.04, GCC 14, native compilation, tree-sitter, LTO; variants =x= and =server=. Prefix =/usr/local=; host-installable. Images keep the configured tree at =/build/emacs= and carry =install-info=. A generated =lisp/site-init.el= dumps =source-directory= as =/usr/local/share/emacs/VERSION/=, recorded as =source-directory:=; in the image its =src/= links to the tree's.
 
 =update NAME= resolves a Git recipe's =ref= in its source repository and rewrites its lock; an annotated tag locks the commit it names. Builds never change the lock and refuse one naming anything but a commit.
 
@@ -88,7 +88,9 @@ Each build writes =.emacsen/builds/DIGEST.txt=, =DIGEST= being the image ID with
 
 =install NAME= resolves =emacsen:NAME= to an image ID and runs Emacs's own =make install= from the image's retained build tree into the host's =/usr/local=. Importantly, **nothing compiles on the host and there is no host =make=, or privilege elevation**.
 
-Refused unless the daemon is rootful, the image carries =install-info=, and its =build-info= has =build-tree:=, =prefix: /usr/local= and an =os-release:= equal to the host's =ID VERSION_ID=. The =26.3= recipe fails these. The container runs as root with no network, capabilities limited to CHOWN, DAC_OVERRIDE, FOWNER and FSETID, and privilege escalation disabled.
+=make install= omits the C sources, so install then copies the tree's =src/*.c= and =src/*.h= to =share/emacs/VERSION/src=, replacing that version's previous copy. =find-function= and the help buffers' C source links reach them without the build tree, under =-Q= too.
+
+Refused unless the daemon is rootful, the image carries =install-info=, and its =build-info= has =build-tree:=, =prefix: /usr/local=, =source-directory: /usr/local/share/emacs/VERSION/= and an =os-release:= equal to the host's =ID VERSION_ID=. The =26.3= recipe fails these. The container runs as root with no network, capabilities limited to CHOWN, DAC_OVERRIDE, FOWNER and FSETID, and privilege escalation disabled.
 
 Rehearse first. =--into DIR= binds =DIR= at =/usr/local= in the container without changing the prefix; a chroot's =usr/local= also works. A staged tree is for inspection, not relocation.
 

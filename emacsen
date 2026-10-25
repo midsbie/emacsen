@@ -406,9 +406,10 @@ check_rootful() {
     [[ $1 != *name=rootless* ]] || fatal "install requires a rootful Docker daemon"
 }
 
-# Validate the image's header and set build_tree in the caller.
+# Validate the header of recipe NAME's image and set build_tree, emacs_version and source_directory
+# in the caller.
 check_installable() {
-    local file=$1 line key host_os
+    local file=$1 name=$2 line key host_os sources
     local -A info=()
 
     while IFS= read -r line || [[ -n $line ]]; do
@@ -430,6 +431,13 @@ check_installable() {
     [[ ${info[emacs-version]-} =~ ^[0-9]+(\.[0-9]+)+$ ]] \
         || fatal "invalid build-info emacs-version: ${info[emacs-version]-missing}"
 
+    # The C sources install beside the version's lisp and etc, where its dumped Emacs looks.
+    key=source-directory
+    sources=$install_prefix/share/emacs/${info[emacs-version]}/
+    [[ ${info[$key]-} == "$sources" ]] \
+        || fatal "image $key (${info[$key]-missing}) is not $sources;" \
+                 "rebuild it with: $root/emacsen build $name"
+
     host_os=$(
         # shellcheck disable=SC1091 # Supplied by the host distribution.
         . /etc/os-release
@@ -440,6 +448,7 @@ check_installable() {
 
     build_tree=${info[build-tree]}
     emacs_version=${info[emacs-version]}
+    source_directory=$sources
 }
 
 install_image() (
@@ -448,7 +457,7 @@ install_image() (
 
     local directory=$install_prefix into_seen=false project mount_source
     local tag="emacsen:$name" image_id security_options scratch cleanup_status=0
-    local build_tree emacs_version installer="$root/emacsen-install.sh" script
+    local build_tree emacs_version source_directory installer="$root/emacsen-install.sh" script
 
     while (( $# )); do
         case $1 in
@@ -483,7 +492,7 @@ install_image() (
         exit "$cleanup_status"
     ' EXIT
     image_file "$image_id" /usr/share/emacsen/build-info "$scratch/build-info"
-    check_installable "$scratch/build-info"
+    check_installable "$scratch/build-info" "$name"
 
     mkdir -p -- "$directory" || fatal "cannot create install directory: $directory"
     project=$(CDPATH='' cd -P -- "$directory" 2>/dev/null && printf '%s/.' "$PWD") \
@@ -499,6 +508,7 @@ install_image() (
         --mount "type=bind,\"source=$mount_source\",target=$install_prefix" \
         --env "EMACSEN_IMAGE_ID=$image_id" --env "EMACSEN_IMAGE_TAG=$tag" \
         --env "EMACSEN_EMACS_VERSION=$emacs_version" \
+        --env "EMACSEN_SOURCE_DIRECTORY=$source_directory" \
         --workdir "$build_tree" --entrypoint bash "$image_id" -c "$script" >&2
     printf 'emacsen: installed %s (%s) into %s\n' "$tag" "$image_id" "$project" >&2
 )
