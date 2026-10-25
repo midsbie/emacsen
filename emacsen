@@ -21,6 +21,7 @@ Usage: emacsen build NAME [--variant x|server]
        emacsen run NAME [--directory DIR] [-- EMACS-ARGS...]
        emacsen exec NAME [--directory DIR] -- COMMAND [ARGS...]
        emacsen install NAME [--into DIR]
+       emacsen uninstall VERSION [--from DIR]
        emacsen update NAME
        emacsen --help
 
@@ -29,17 +30,19 @@ Emacs, or COMMAND for exec, with DIR (default: current directory) read-only at
 /work.  When attached to a terminal, provide a terminal inside the container.
 Run and exec never build or pull an image. Arguments are passed unchanged.
 Update locks a Git recipe's ref to a commit; builds use that lock unchanged.
-Install uses a rootful Docker daemon and defaults to /usr/local, where versions
-coexist and the last install owns bin/emacs.
+Install and uninstall use a rootful Docker daemon and default to /usr/local,
+where versions coexist and the last install owns bin/emacs. Uninstall requires
+exactly one recorded version and the image that installed it.
 EOF
 }
 
 declare -A recipe=()
-# The only image prefix install accepts. Install mounts its target there and uses it as the default
-# target, since an installed Emacs runs only from its prefix. emacsen-install.sh assumes it.
+# The only image prefix install accepts. Install and uninstall mount their target there and default
+# to it, since an installed Emacs runs only from its prefix. emacsen-install.sh assumes it.
 readonly install_prefix=/usr/local
-# Metadata and build-info keys. They become associative-array subscripts, so they admit no
-# character Bash expands.
+readonly version_pattern='[0-9]+(\.[0-9]+)+'
+# Metadata and build-info keys. They become associative-array subscripts, so they admit no character
+# Bash expands.
 readonly key_pattern='[a-z][a-z0-9-]*'
 
 read_metadata() {
@@ -403,32 +406,42 @@ build_image() (
 )
 
 check_rootful() {
-    [[ $1 != *name=rootless* ]] || fatal "install requires a rootful Docker daemon"
+    [[ $1 != *name=rootless* ]] || fatal "install and uninstall require a rootful Docker daemon"
 }
 
-# Validate the header of recipe NAME's image and set build_tree, emacs_version and source_directory
-# in the caller.
-check_installable() {
-    local file=$1 name=$2 line key host_os sources
-    local -A info=()
+# Build-info and installation records share this header; the sections after it are provenance.
+read_info_header() {
+    local file=$1 line key
+    local -n header=$2
+
+    header=()
 
     while IFS= read -r line || [[ -n $line ]]; do
         [[ $line == \[* ]] && break
         [[ -z $line ]] && continue
 
         [[ $line =~ ^($key_pattern)': '(.*)$ ]] \
-            || fatal "invalid build-info header line in $file: $line"
+            || fatal "invalid header line in $file: $line"
 
         key=${BASH_REMATCH[1]}
-        [[ ! -v 'info[$key]' ]] || fatal "duplicate build-info field in $file: $key"
-        info["$key"]=${BASH_REMATCH[2]}
+        [[ ! -v 'header[$key]' ]] || fatal "duplicate header field in $file: $key"
+        header["$key"]=${BASH_REMATCH[2]}
     done < "$file"
+}
+
+# Validate the build-info of recipe NAME's image and set build_tree, emacs_version and
+# source_directory in the caller.
+check_installable() {
+    local file=$1 name=$2 key host_os sources
+    local -A info=()
+
+    read_info_header "$file" info
 
     [[ -n ${info[build-tree]-} ]] \
         || fatal "image is not host-installable"
     [[ ${info[prefix]-} == "$install_prefix" ]] \
         || fatal "install requires image prefix $install_prefix"
-    [[ ${info[emacs-version]-} =~ ^[0-9]+(\.[0-9]+)+$ ]] \
+    [[ ${info[emacs-version]-} =~ ^$version_pattern$ ]] \
         || fatal "invalid build-info emacs-version: ${info[emacs-version]-missing}"
 
     # The C sources install beside the version's lisp and etc, where its dumped Emacs looks.
@@ -451,25 +464,60 @@ check_installable() {
     source_directory=$sources
 }
 
-install_image() (
-    local name=$1
-    shift
+# Validate the installation record FILE of Emacs VERSION and set tag, image_id, build_tree and
+# emacs_version in the caller.
+check_uninstallable() {
+    local file=$1 version=$2 key
+    local -A installed=()
 
-    local directory=$install_prefix into_seen=false project mount_source
-    local tag="emacsen:$name" image_id security_options scratch cleanup_status=0
-    local build_tree emacs_version source_directory installer="$root/emacsen-install.sh" script
+    [[ -f $file ]] || fatal "no installation record for Emacs $version: $file"
+    read_info_header "$file" installed
 
+    key='image-id'
+    image_id=${installed[$key]-}
+    [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || fatal "invalid $key in $file: ${image_id:-missing}"
+
+    key='image-tag'
+    tag=${installed[$key]-}
+    [[ -n $tag ]] \
+        || fatal "missing $key in $file"
+
+    build_tree=${installed[build-tree]-}
+    [[ -n $build_tree ]] \
+        || fatal "missing build-tree in $file"
+
+    [[ ${installed[emacs-version]-} == "$version" ]] \
+        || fatal "emacs-version in $file is not $version: ${installed[emacs-version]-missing}"
+    emacs_version=$version
+
+    # Only the image that installed a version knows what it installed, and its tag may have moved.
+    [[ $(docker image inspect --format '{{.Id}}' "$image_id" 2>/dev/null) == "$image_id" ]] \
+        || fatal "recorded image $image_id is not available locally: $file"
+}
+
+run_installer() (
+    local action=$1 name=$2
+    shift 2
+
+    local directory=$install_prefix directory_seen=false directory_option=--into
+    local project mount_source tag image_id security_options scratch cleanup_status=0
+    local build_tree emacs_version source_directory='' installer="$root/emacsen-install.sh" script
+
+    if [[ $action == uninstall ]]; then directory_option=--from; fi
     while (( $# )); do
         case $1 in
-            --into)
-                [[ $into_seen == false ]] || fatal "--into may be specified only once"
-                [[ $# -ge 2 && -n $2 && $2 != --* ]] || fatal "--into requires a directory"
+            "$directory_option")
+                [[ $directory_seen == false ]] \
+                    || fatal "$directory_option may be specified only once"
+                [[ $# -ge 2 && -n $2 && $2 != --* ]] \
+                    || fatal "$directory_option requires a directory"
 
                 directory=$2
-                into_seen=true
+                directory_seen=true
                 shift 2
                 ;;
-            *) fatal "expected --into DIR, got: $1" ;;
+            *) fatal "expected $directory_option DIR, got: $1" ;;
         esac
     done
 
@@ -480,27 +528,32 @@ install_image() (
         || fatal "cannot access Docker; check the daemon and your Docker permissions"
     check_rootful "$security_options"
 
-    image_id=$(docker image inspect --format '{{.Id}}' "$tag" 2>/dev/null) \
-        || fatal "local image $tag is missing; build it with: $root/emacsen build $name"
-    [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] \
-        || fatal "invalid image identity returned for $tag"
-
-    scratch=$(mktemp -d "${TMPDIR:-/tmp}/emacsen-install-XXXXXXXX")
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/emacsen-$action-XXXXXXXX")
     trap '
         cleanup_status=$?
         rm -rf -- "$scratch"
         exit "$cleanup_status"
     ' EXIT
-    image_file "$image_id" /usr/share/emacsen/build-info "$scratch/build-info"
-    check_installable "$scratch/build-info" "$name"
+    if [[ $action == install ]]; then
+        tag="emacsen:$name"
+        image_id=$(docker image inspect --format '{{.Id}}' "$tag" 2>/dev/null) \
+            || fatal "local image $tag is missing; build it with: $root/emacsen build $name"
+        [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || fatal "invalid image identity returned for $tag"
+        image_file "$image_id" /usr/share/emacsen/build-info "$scratch/build-info"
+        check_installable "$scratch/build-info" "$name"
+        mkdir -p -- "$directory" || fatal "cannot create install directory: $directory"
+    else
+        check_uninstallable "$directory/lib/emacsen/installed/$name" "$name"
+    fi
 
-    mkdir -p -- "$directory" || fatal "cannot create install directory: $directory"
     project=$(CDPATH='' cd -P -- "$directory" 2>/dev/null && printf '%s/.' "$PWD") \
         || fatal "not an accessible directory: $directory"
     project=${project%/.}
     mount_source=${project//\"/\"\"}/.
 
-    printf 'emacsen: installing %s (%s) into %s\n' "$tag" "$image_id" "$project" >&2
+    printf 'emacsen: %s %s (%s) %s %s\n' \
+        "${action}ing" "$tag" "$image_id" "${directory_option#--}" "$project" >&2
     # An argument, not stdin: a child that reads stdin would swallow the rest of a piped script.
     docker run --rm --pull=never --network=none \
         --cap-drop=ALL --cap-add=CHOWN --cap-add=DAC_OVERRIDE --cap-add=FOWNER --cap-add=FSETID \
@@ -509,8 +562,10 @@ install_image() (
         --env "EMACSEN_IMAGE_ID=$image_id" --env "EMACSEN_IMAGE_TAG=$tag" \
         --env "EMACSEN_EMACS_VERSION=$emacs_version" \
         --env "EMACSEN_SOURCE_DIRECTORY=$source_directory" \
-        --workdir "$build_tree" --entrypoint bash "$image_id" -c "$script" >&2
-    printf 'emacsen: installed %s (%s) into %s\n' "$tag" "$image_id" "$project" >&2
+        --workdir "$build_tree" --entrypoint bash "$image_id" \
+        -c "$script" emacsen-install.sh "$action" >&2
+    printf 'emacsen: %s %s (%s) %s %s\n' \
+        "${action}ed" "$tag" "$image_id" "${directory_option#--}" "$project" >&2
 )
 
 run_image() {
@@ -605,6 +660,9 @@ case ${1-} in
     install)
         [[ $# -ge 2 ]] || fatal "usage: emacsen install NAME [--into DIR]"
         ;;
+    uninstall)
+        [[ $# -ge 2 ]] || fatal "usage: emacsen uninstall VERSION [--from DIR]"
+        ;;
     run)
         [[ $# -ge 2 ]] || fatal "usage: emacsen run NAME [--directory DIR] [-- EMACS-ARGS...]"
         ;;
@@ -616,16 +674,20 @@ case ${1-} in
 esac
 
 root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+action=$1
 name=$2
-[[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -f $root/recipes/$name/recipe ]] \
-    || fatal "no recipe named $name"
+if [[ $action == uninstall ]]; then
+    [[ $name =~ ^$version_pattern$ ]] || fatal "invalid Emacs version: $name"
+else
+    [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -f $root/recipes/$name/recipe ]] \
+        || fatal "no recipe named $name"
+fi
 
 # Second pass: run the command.
-action=$1
 shift 2
 case $action in
     build) build_image "$name" "$@" ;;
     update) update_source "$name" ;;
-    install) install_image "$name" "$@" ;;
+    install|uninstall) run_installer "$action" "$name" "$@" ;;
     run|exec) run_image "$action" "$name" "$@" ;;
 esac

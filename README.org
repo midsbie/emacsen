@@ -129,11 +129,15 @@ After inspecting the staged tree, install on the host:
 
 ** Installed files
 
-Different Emacs versions coexist in version-named directories. Reinstalling the same version, including another recipe or variant, replaces that version's files and record. The last install owns the shared files: =bin/emacs= links to its =emacs-VERSION=; =emacsclient=, =etags=, =ebrowse=, the manuals and the man pages are replaced. emacsen neither prunes nor uninstalls.
+Different Emacs versions coexist in version-named directories. Reinstalling the same version, including another recipe or variant, replaces that version's files and record. The last install owns the shared files: =bin/emacs= links to its =emacs-VERSION=; =emacsclient=, =etags=, =ebrowse=, the manuals and the man pages are replaced. emacsen does not prune.
 
 Install copies the C sources to =share/emacs/VERSION/src=. =find-function= and the help buffers' C source links reach them without the build tree, under =-Q= too.
 
-Each version's record, =/usr/local/lib/emacsen/installed/VERSION=, holds =image-id:=, =image-tag:= and the image's =build-info=. Neither files nor records depend on the image remaining available. A prefix takes one install at a time, from any checkout: a second is refused while the first holds =lib/emacsen/install.lock=.
+Each version's record, =/usr/local/lib/emacsen/installed/VERSION=, holds =image-id:=, =image-tag:= and the image's =build-info=. Neither files nor records depend on the image remaining available; uninstall does. A prefix takes one install or uninstall at a time, from any checkout: a second is refused while the first holds =lib/emacsen/install.lock=.
+
+** Uninstall
+
+=uninstall VERSION [--from DIR]= runs Emacs's own =make uninstall= from the image recorded for the installed version =VERSION=, selected by ID: a moved tag does not affect it, and a missing image is an error. Removal runs inside that image, so the host's OS release need not match. It requires exactly one recorded version, because =make uninstall= also removes the shared files, and does not detect files replaced outside emacsen.
 
 * Run and exec
 
