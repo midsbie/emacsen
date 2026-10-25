@@ -38,8 +38,10 @@ EOF
 
 declare -A recipe=()
 # The only image prefix install accepts. Install and uninstall mount their target there and default
-# to it, since an installed Emacs runs only from its prefix. emacsen-install.sh assumes it.
+# to it, since an installed Emacs runs only from its prefix.
 readonly install_prefix=/usr/local
+# emacsen's state in a prefix, relative to it: installation records and the prefix lock.
+readonly state_directory=lib/emacsen
 readonly version_pattern='[0-9]+(\.[0-9]+)+'
 # Metadata and build-info keys. They become associative-array subscripts, so they admit no character
 # Bash expands.
@@ -546,7 +548,7 @@ run_installer() (
         check_installable "$scratch/build-info" "$operand"
         mkdir -p -- "$directory" || fatal "cannot create install directory: $directory"
     else
-        check_uninstallable "$directory/lib/emacsen/installed/$operand" "$operand"
+        check_uninstallable "$directory/$state_directory/installed/$operand" "$operand"
     fi
 
     project=$(CDPATH='' cd -P -- "$directory" 2>/dev/null && printf '%s/.' "$PWD") \
@@ -563,6 +565,7 @@ run_installer() (
         --mount "type=bind,\"source=$mount_source\",target=$install_prefix" \
         --env "EMACSEN_IMAGE_ID=$image_id" --env "EMACSEN_IMAGE_TAG=$tag" \
         --env "EMACSEN_EMACS_VERSION=$emacs_version" \
+        --env "EMACSEN_STATE_DIRECTORY=$install_prefix/$state_directory" \
         --env "EMACSEN_SOURCE_DIRECTORY=$source_directory" \
         --workdir "$build_tree" --entrypoint bash "$image_id" \
         -c "$script" emacsen-install.sh "$action" >&2

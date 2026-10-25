@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# The in-container half of `emacsen install` and `emacsen uninstall`, which pass this file to
-# bash -c inside the image with the action as its argument. It runs as root with the target
-# bind-mounted at /usr/local, the image's configured build tree as the working directory, and
-# EMACSEN_IMAGE_ID, EMACSEN_IMAGE_TAG and EMACSEN_EMACS_VERSION naming the image and its Emacs.
+# The in-container half of `emacsen install` and `emacsen uninstall`, which pass this file to bash
+# -c inside the image with the action as its argument. It runs as root with the target bind-mounted
+# at the image's prefix, the image's configured build tree as the working directory,
+# EMACSEN_IMAGE_ID, EMACSEN_IMAGE_TAG and EMACSEN_EMACS_VERSION naming the image and its Emacs, and
+# EMACSEN_STATE_DIRECTORY naming emacsen's state directory in the target.
+#
 # Install also takes EMACSEN_SOURCE_DIRECTORY, that Emacs's dumped source-directory. It is not for
 # running on the host.
 
@@ -27,7 +29,7 @@ install_emacs() (
     mv -- "$staged" "$sources"
 
     # One record per version: make install leaves other versions' trees in place.
-    scratch=$(mktemp "$state/installed/.record-XXXXXXXX")
+    scratch=$(mktemp "$EMACSEN_STATE_DIRECTORY/installed/.record-XXXXXXXX")
     trap 'rm -f -- "$scratch"' EXIT
     {
         printf 'image-id: %s\nimage-tag: %s\n\n' "$EMACSEN_IMAGE_ID" "$EMACSEN_IMAGE_TAG"
@@ -49,7 +51,7 @@ uninstall_emacs() (
 
     # make uninstall removes the shared binaries and manuals whichever version installed them.
     shopt -s nullglob
-    for entry in "$state/installed/"*; do
+    for entry in "$EMACSEN_STATE_DIRECTORY/installed/"*; do
         [[ $entry == "$record" ]] \
             || fatal "uninstall requires exactly one recorded version; also found: $entry"
     done
@@ -67,22 +69,16 @@ command -v install-info >/dev/null \
 command -v flock >/dev/null \
     || fatal "image has no flock: $EMACSEN_IMAGE_TAG"
 
-if [[ $action == install ]]; then
-    [[ $EMACSEN_SOURCE_DIRECTORY == /usr/local/share/emacs/*/ ]] \
-        || fatal "source-directory is not under /usr/local/share/emacs: $EMACSEN_SOURCE_DIRECTORY"
-fi
-
-state=/usr/local/lib/emacsen
-record=$state/installed/$EMACSEN_EMACS_VERSION
-mkdir -p -- "$state/installed"
+record=$EMACSEN_STATE_DIRECTORY/installed/$EMACSEN_EMACS_VERSION
+mkdir -p -- "$EMACSEN_STATE_DIRECTORY/installed"
 
 # Every version shares bin/emacs, the manuals and the info directory, so install and uninstall into
 # one prefix hold one lock, which lives in the prefix to be shared by every checkout and outlives
 # the last record. A second operation is refused, not queued: queueing would let timing choose
 # which install owns bin/emacs.
-exec {lock}>> "$state/install.lock"
+exec {lock}>> "$EMACSEN_STATE_DIRECTORY/install.lock"
 flock --nonblock "$lock" \
-    || fatal "another install or uninstall in this prefix holds lib/emacsen/install.lock"
+    || fatal "another install or uninstall holds $EMACSEN_STATE_DIRECTORY/install.lock"
 
 case $action in
     install) install_emacs ;;
